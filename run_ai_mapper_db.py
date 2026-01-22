@@ -8,7 +8,7 @@ import time
 
 
 def main():
-    # Fetch unclassified items FIRST (before creating expensive objects)
+    # Fetch unclassified items FIRST
     print("🔍 Checking for new items to classify...")
     rows = fetch_distinct_primary_groups()
     
@@ -19,8 +19,8 @@ def main():
         print("✅ All items already classified. Nothing to do.")
         return
     
-    # Only NOW create session and mapper (expensive operations)
-    print("⚙️  Initializing AI mapper...")
+    # Initialize session and mapper
+    print("⚙️ Initializing AI mapper...")
     session = SessionLocal()
     
     init_start = time.time()
@@ -35,6 +35,8 @@ def main():
         print("-" * 75)
         
         for idx, row in enumerate(rows, 1):
+            stg_id = row["id"]
+            raw_id = row["raw_id"]
             tenant_id = row["tenant_id"]
             primary_group = row["primary_group"]
 
@@ -43,9 +45,11 @@ def main():
             result = mapper.predict_single(primary_group)
             elapsed = time.time() - item_start
 
-            # Insert to database (atomic, no race condition)
+            # Insert to database with stg_id
             insert_dimfs(
                 session=session,
+                stg_id=stg_id,
+                raw_id=raw_id,
                 tenant_id=tenant_id,
                 primary_group=primary_group,
                 ai_result=result
@@ -55,7 +59,7 @@ def main():
             truncated = (primary_group[:42] + '...') if len(primary_group) > 45 else primary_group
             print(f"{truncated:<45} | {elapsed:5.2f}s | {result['method_used']:^10} | {result['confidence']:4.0%}")
             
-            # Commit every 10 rows to avoid long transactions
+            # Commit every 10 rows
             if idx % 10 == 0:
                 session.commit()
                 print(f"💾 Checkpoint: {idx}/{len(rows)} committed")
@@ -65,7 +69,7 @@ def main():
         
         total_time = time.time() - total_start
         
-        # Display final stats
+        # Display stats
         stats = mapper.get_session_stats()
         llm_stats = stats.get('llm_stats', {})
         

@@ -6,7 +6,9 @@ from db.session import engine
 
 STAGING_QUERY = """
 SELECT DISTINCT
+    s.id,
     s.tenant_id,
+    s.raw_id,
     s.primary_group
 FROM staging.stg_fs_mapper s
 WHERE s.primary_group IS NOT NULL
@@ -14,8 +16,7 @@ WHERE s.primary_group IS NOT NULL
   AND NOT EXISTS (
       SELECT 1 
       FROM marts.dim_fs d
-      WHERE d.tenant_id = s.tenant_id
-        AND d.primary_group = s.primary_group
+      WHERE d.stg_id = s.id
   )
 """
 
@@ -24,7 +25,7 @@ def fetch_distinct_primary_groups():
     """
     Returns a list of dicts:
     [
-        {"tenant_id": "...", "primary_group": "..."},
+        {"id": "...", "tenant_id": "...", "primary_group": "..."},
         ...
     ]
     """

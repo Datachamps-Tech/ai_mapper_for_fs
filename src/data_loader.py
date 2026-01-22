@@ -39,7 +39,7 @@ class DataLoader:
                     cf_classification,
                     cf_sub_classification,
                     expense_type
-                FROM raw.ai_mapper_train
+                FROM ai_config.kb_dim_fs
                 WHERE is_active = true
             """
             df = pd.read_sql(text(query), engine)
