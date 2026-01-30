@@ -5,12 +5,20 @@ from db.staging_reader import fetch_distinct_primary_groups
 from db.dimfs_writer import insert_dimfs
 from src.mapper import AIMapper
 import time
+import os
 
 
 def main():
-    # Fetch unclassified items FIRST
-    print("🔍 Checking for new items to classify...")
-    rows = fetch_distinct_primary_groups()
+    # Get tenant_id from environment variable (set by API)
+    tenant_id = os.getenv("TENANT_ID")
+    
+    if tenant_id:
+        print(f"🔍 Running AI mapper for tenant: {tenant_id}")
+    else:
+        print("🔍 Running AI mapper for ALL tenants (batch mode)")
+    
+    # Fetch unclassified items with tenant filter
+    rows = fetch_distinct_primary_groups(tenant_id=tenant_id)
     
     print(f"📊 Found {len(rows)} new items to classify")
     
@@ -24,7 +32,7 @@ def main():
     session = SessionLocal()
     
     init_start = time.time()
-    mapper = AIMapper()
+    mapper = AIMapper()  # Uses shared API key from environment
     mapper.refresh_training_data()
     print(f"✅ Mapper initialized in {time.time() - init_start:.2f}s\n")
 
@@ -37,7 +45,7 @@ def main():
         for idx, row in enumerate(rows, 1):
             stg_id = row["id"]
             raw_id = row["raw_id"]
-            tenant_id = row["tenant_id"]
+            row_tenant_id = row["tenant_id"]
             primary_group = row["primary_group"]
 
             # Time individual prediction
@@ -50,7 +58,7 @@ def main():
                 session=session,
                 stg_id=stg_id,
                 raw_id=raw_id,
-                tenant_id=tenant_id,
+                tenant_id=row_tenant_id,
                 primary_group=primary_group,
                 ai_result=result
             )
@@ -76,10 +84,11 @@ def main():
         print("\n" + "=" * 75)
         print("🎉 AI MAPPING COMPLETED SUCCESSFULLY")
         print("=" * 75)
+        if tenant_id:
+            print(f"👤 Tenant ID:        {tenant_id}")
         print(f"⏱️  Total time:        {total_time:.2f}s ({total_time/len(rows):.2f}s per item)")
         print(f"📊 Total predictions: {stats['predictions_made']}")
         print(f"🤖 LLM calls:         {llm_stats.get('call_count', 0)} ({llm_stats.get('call_count', 0)/len(rows)*100:.1f}%)")
-        print(f"💰 Total cost:        ${llm_stats.get('total_cost', 0):.4f}")
         print(f"⚠️  Needs review:      {stats['needs_review_count']}")
         
         print("\n📈 Method Distribution:")

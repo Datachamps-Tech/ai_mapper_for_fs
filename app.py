@@ -453,27 +453,6 @@ with tab1:
 with tab2:
     st.header("Batch Processing")
     
-    # Check for incomplete batch
-    checkpoint = st.session_state.mapper.check_checkpoint()
-    if checkpoint:
-        st.warning(f"""
-        ⚠️ **Incomplete Batch Found**  
-        File: `{Path(checkpoint['input_file']).name}`  
-        Processed: {checkpoint['processed_rows']} rows  
-        Last updated: {checkpoint['timestamp']}
-        """)
-        
-        col1, col2 = st.columns(2)
-        with col1:
-            if st.button("▶️ Resume", use_container_width=True):
-                st.session_state.resume_batch = True
-        with col2:
-            if st.button("🔄 Start Fresh", use_container_width=True):
-                config.PROGRESS_CHECKPOINT.unlink()
-                st.session_state.resume_batch = False
-                st.rerun()
-        
-        st.markdown("---")
     
     # File upload
     uploaded_file = st.file_uploader(

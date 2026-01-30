@@ -7,6 +7,7 @@ def insert_dimfs(session, stg_id, tenant_id, primary_group, ai_result, raw_id):
     """
     Insert new classification result. Skip if stg_id already exists.
     Uses PostgreSQL ON CONFLICT DO NOTHING - atomic and safe.
+    Unique constraint on stg_id prevents duplicate entries.
     """
     clean_result = clean_nan(ai_result)
     
@@ -36,6 +37,6 @@ def insert_dimfs(session, stg_id, tenant_id, primary_group, ai_result, raw_id):
         reasoning=clean_result.get("reasoning"),
         created_at=datetime.utcnow(),
         updated_at=datetime.utcnow()
-    )
+    ).on_conflict_do_nothing()
     
     session.execute(stmt)
