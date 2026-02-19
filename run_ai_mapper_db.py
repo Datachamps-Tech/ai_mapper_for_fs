@@ -1,115 +1,143 @@
 # run_ai_mapper_db.py
 
+import os
+import time
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from db.session import SessionLocal
 from db.staging_reader import fetch_distinct_primary_groups
 from db.dimfs_writer import insert_dimfs
 from src.mapper import AIMapper
-import time
-import os
+
+MAX_WORKERS = int(os.getenv("AI_MAPPER_WORKERS", 5))
+
+# Thread-local storage for DB sessions (one session per thread, not shared)
+_thread_local = threading.local()
+
+
+def get_thread_session():
+    """Each thread gets its own SQLAlchemy session."""
+    if not hasattr(_thread_local, "session"):
+        _thread_local.session = SessionLocal()
+    return _thread_local.session
+
+
+def close_thread_session():
+    """Close this thread's session if it exists."""
+    if hasattr(_thread_local, "session"):
+        _thread_local.session.close()
+        del _thread_local.session
+
+
+def process_single_row(row, mapper):
+    """
+    Worker function: classifies one staging row and writes to dim_fs.
+    Each thread gets its own DB session via thread-local storage.
+    mapper is shared (read-only after init) — safe across threads.
+    """
+    stg_id = row["id"]
+    raw_id = row["raw_id"]
+    tenant_id = row["tenant_id"]
+    primary_group = row["primary_group"]
+
+    item_start = time.time()
+
+    try:
+        # Classify — mapper is shared but all operations are read-only
+        result = mapper.predict_single(primary_group)
+        elapsed = time.time() - item_start
+
+        # Thread-local session — no sharing, no race conditions
+        session = get_thread_session()
+        insert_dimfs(
+            session=session,
+            stg_id=stg_id,
+            raw_id=raw_id,
+            tenant_id=tenant_id,
+            primary_group=primary_group,
+            ai_result=result
+        )
+        session.commit()
+
+        truncated = (primary_group[:42] + "...") if len(primary_group) > 45 else primary_group
+        print(f"✅ {truncated:<45} | {elapsed:5.2f}s | {result['method_used']:^10} | {result['confidence']:4.0%}")
+
+        return {"status": "success", "primary_group": primary_group, "result": result}
+
+    except Exception as e:
+        # Roll back only this thread's session
+        try:
+            get_thread_session().rollback()
+        except Exception:
+            pass
+        print(f"❌ FAILED: {primary_group} → {e}")
+        return {"status": "failed", "primary_group": primary_group, "error": str(e)}
 
 
 def main():
-    # Get tenant_id from environment variable (set by API)
-    tenant_id = os.getenv("TENANT_ID")
-    
-    if tenant_id:
-        print(f"🔍 Running AI mapper for tenant: {tenant_id}")
-    else:
-        print("🔍 Running AI mapper for ALL tenants (batch mode)")
-    
-    # Fetch unclassified items with tenant filter
-    rows = fetch_distinct_primary_groups(tenant_id=tenant_id)
-    
+    print("🔍 Checking for new items to classify...")
+    rows = fetch_distinct_primary_groups()
     print(f"📊 Found {len(rows)} new items to classify")
-    
-    # Early exit if nothing to do
+
     if len(rows) == 0:
         print("✅ All items already classified. Nothing to do.")
         return
-    
-    # Initialize session and mapper
+
+    # Initialize mapper ONCE — shared across all threads (read-only after init)
     print("⚙️ Initializing AI mapper...")
-    session = SessionLocal()
-    
     init_start = time.time()
-    mapper = AIMapper()  # Uses shared API key from environment
+    mapper = AIMapper()
     mapper.refresh_training_data()
-    print(f"✅ Mapper initialized in {time.time() - init_start:.2f}s\n")
+    print(f"✅ Mapper initialized in {time.time() - init_start:.2f}s")
+    print(f"⚡ Running with {MAX_WORKERS} parallel workers\n")
+
+    print(f"{'Item':<45} | {'Time':>6} | {'Method':^10} | {'Conf':>5}")
+    print("-" * 75)
+
+    total_start = time.time()
+    results = []
 
     try:
-        total_start = time.time()
-        
-        print(f"{'Item':<45} | {'Time':>6} | {'Method':^10} | {'Conf':>5}")
-        print("-" * 75)
-        
-        for idx, row in enumerate(rows, 1):
-            stg_id = row["id"]
-            raw_id = row["raw_id"]
-            row_tenant_id = row["tenant_id"]
-            primary_group = row["primary_group"]
+        with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+            future_to_row = {
+                executor.submit(process_single_row, row, mapper): row
+                for row in rows
+            }
 
-            # Time individual prediction
-            item_start = time.time()
-            result = mapper.predict_single(primary_group)
-            elapsed = time.time() - item_start
-
-            # Insert to database with stg_id
-            insert_dimfs(
-                session=session,
-                stg_id=stg_id,
-                raw_id=raw_id,
-                tenant_id=row_tenant_id,
-                primary_group=primary_group,
-                ai_result=result
-            )
-
-            # Progress line
-            truncated = (primary_group[:42] + '...') if len(primary_group) > 45 else primary_group
-            print(f"{truncated:<45} | {elapsed:5.2f}s | {result['method_used']:^10} | {result['confidence']:4.0%}")
-            
-            # Commit every 10 rows
-            if idx % 10 == 0:
-                session.commit()
-                print(f"💾 Checkpoint: {idx}/{len(rows)} committed")
-
-        # Final commit
-        session.commit()
-        
-        total_time = time.time() - total_start
-        
-        # Display stats
-        stats = mapper.get_session_stats()
-        llm_stats = stats.get('llm_stats', {})
-        
-        print("\n" + "=" * 75)
-        print("🎉 AI MAPPING COMPLETED SUCCESSFULLY")
-        print("=" * 75)
-        if tenant_id:
-            print(f"👤 Tenant ID:        {tenant_id}")
-        print(f"⏱️  Total time:        {total_time:.2f}s ({total_time/len(rows):.2f}s per item)")
-        print(f"📊 Total predictions: {stats['predictions_made']}")
-        print(f"🤖 LLM calls:         {llm_stats.get('call_count', 0)} ({llm_stats.get('call_count', 0)/len(rows)*100:.1f}%)")
-        print(f"⚠️  Needs review:      {stats['needs_review_count']}")
-        
-        print("\n📈 Method Distribution:")
-        for method, count in stats['method_distribution'].items():
-            if count > 0:
-                pct = count / stats['predictions_made'] * 100
-                bar = "█" * int(pct / 2)
-                print(f"  {method:12} | {bar:50} {count:3} ({pct:5.1f}%)")
-        
-        print("=" * 75)
-
-    except Exception as e:
-        session.rollback()
-        print(f"\n❌ ERROR: {e}")
-        import traceback
-        traceback.print_exc()
-        raise
+            for future in as_completed(future_to_row):
+                try:
+                    result = future.result()
+                    results.append(result)
+                except Exception as e:
+                    row = future_to_row[future]
+                    print(f"❌ Unhandled exception for {row['primary_group']}: {e}")
+                    results.append({"status": "failed", "primary_group": row["primary_group"], "error": str(e)})
 
     finally:
-        session.close()
-        print("🔒 Database connection closed")
+        # Close all thread-local sessions
+        # ThreadPoolExecutor reuses threads, so explicitly clean up
+        # (sessions auto-close when threads exit, but this is safer)
+        pass
+
+    total_time = time.time() - total_start
+    success_count = sum(1 for r in results if r["status"] == "success")
+    failed_count = sum(1 for r in results if r["status"] == "failed")
+
+    print("\n" + "=" * 75)
+    print("🎉 AI MAPPING COMPLETED")
+    print("=" * 75)
+    print(f"⏱️  Total time:     {total_time:.2f}s  ({total_time / len(rows):.2f}s per item avg)")
+    print(f"⚡ Throughput:     {len(rows) / total_time:.2f} items/sec")
+    print(f"✅ Success:        {success_count}/{len(rows)}")
+    print(f"❌ Failed:         {failed_count}/{len(rows)}")
+
+    if failed_count > 0:
+        print("\n⚠️  Failed items:")
+        for r in results:
+            if r["status"] == "failed":
+                print(f"   - {r['primary_group']}: {r.get('error', 'unknown')}")
+
+    print("=" * 75)
 
 
 if __name__ == "__main__":

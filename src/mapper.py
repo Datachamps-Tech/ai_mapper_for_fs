@@ -17,7 +17,7 @@ from src.embedding_matcher import EmbeddingMatcher
 from src.llm_matcher import LLMMatcher
 from src.utils import create_result_dict
 from src.gemini_matcher import GeminiMatcher
-
+import concurrent.futures
 class AIMapper:
     """Main orchestrator for accounting classification"""
     
@@ -58,8 +58,12 @@ class AIMapper:
             'needs_review_count': 0
         }
     
+# In mapper.py — replace _load_training_data()
+
+
+
     def _load_training_data(self):
-        """Load training data and initialize matchers"""
+        """Load training data and initialize matchers — heavy ones in parallel"""
         result = self.data_loader.load_training_data()
         
         if not result['success']:
@@ -67,12 +71,18 @@ class AIMapper:
         
         training_data = result['data']
         
-        # Initialize matchers
+        # These are fast — do them immediately
         self.exact_matcher = ExactMatcher(training_data)
         self.fuzzy_matcher = FuzzyMatcher(training_data)
-        self.semantic_matcher = SemanticMatcher(training_data)
-        self.embedding_matcher = EmbeddingMatcher(training_data)
         self.llm_matcher = GeminiMatcher(api_key=None, domain=self.domain)
+        
+        # spaCy + SentenceTransformer are slow — load them in parallel
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+            semantic_future = executor.submit(SemanticMatcher, training_data)
+            embedding_future = executor.submit(EmbeddingMatcher, training_data)
+            
+            self.semantic_matcher = semantic_future.result()
+            self.embedding_matcher = embedding_future.result()
     
     def predict_single(self, primary_group: str, return_decision_trail: bool = False) -> Dict[str, Any]:
         """
