@@ -8,17 +8,11 @@ from typing import List, Dict, Any, Optional
 def fetch_distinct_primary_groups(tenant_id: Optional[str] = None) -> List[Dict[str, Any]]:
     """
     Fetch unclassified primary groups from staging table.
-    
-    Args:
-        tenant_id: If provided, only fetch rows for this tenant.
-                   If None, fetch all tenants (batch processing mode).
-    
-    Returns:
-        List of dicts with keys: id, tenant_id, raw_id, primary_group
+    Deduplication: skip if (tenant_id + primary_group) already exists in dim_fs.
+    Within staging itself, only take one row per (tenant_id + primary_group) combo.
     """
-    # Base query
     query = """
-    SELECT DISTINCT
+    SELECT DISTINCT ON (s.tenant_id, s.primary_group)
         s.id,
         s.tenant_id,
         s.raw_id,
@@ -29,20 +23,20 @@ def fetch_distinct_primary_groups(tenant_id: Optional[str] = None) -> List[Dict[
       AND NOT EXISTS (
           SELECT 1 
           FROM marts.dim_fs d
-          WHERE d.stg_id = s.id
+          WHERE d.tenant_id = s.tenant_id
+            AND LOWER(TRIM(d.primary_group)) = LOWER(TRIM(s.primary_group))
       )
     """
-    
-    # Add tenant filter if provided
+
     if tenant_id:
         query += " AND s.tenant_id = :tenant_id"
-    
+
     with engine.connect() as conn:
         if tenant_id:
             result = conn.execute(text(query), {"tenant_id": tenant_id})
         else:
             result = conn.execute(text(query))
-        
+
         rows = result.mappings().all()
-    
+
     return rows
