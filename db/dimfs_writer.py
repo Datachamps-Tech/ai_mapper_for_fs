@@ -5,15 +5,15 @@ from datetime import datetime
 
 def insert_dimfs(session, stg_id, tenant_id, primary_group, ai_result, raw_id):
     """
-    Insert new classification result. Skip if stg_id already exists.
-    Uses PostgreSQL ON CONFLICT DO NOTHING - atomic and safe.
-    Unique constraint on stg_id prevents duplicate entries.
+    Insert new classification result.
+    Skip if (tenant_id + primary_group) already exists in dim_fs.
+    Uses PostgreSQL ON CONFLICT DO NOTHING on composite unique constraint.
     """
     clean_result = clean_nan(ai_result)
-    
+
     stmt = insert(DimFS).values(
-        stg_id=stg_id,
         raw_id=raw_id,
+        stg_id=stg_id,
         tenant_id=tenant_id,
         primary_group=primary_group,
         fs=clean_result.get("fs"),
@@ -37,6 +37,8 @@ def insert_dimfs(session, stg_id, tenant_id, primary_group, ai_result, raw_id):
         reasoning=clean_result.get("reasoning"),
         created_at=datetime.utcnow(),
         updated_at=datetime.utcnow()
-    ).on_conflict_do_nothing()
-    
+    ).on_conflict_do_nothing(
+        index_elements=['tenant_id', 'primary_group']
+    )
+
     session.execute(stmt)
